@@ -83,6 +83,7 @@
 #include "userconfig.h"
 #include "buttons.h"
 #include "version.h"
+#include "Adafruit_SleepyDog.h"
 
 
 #ifdef LCDSCREEN16x2
@@ -207,7 +208,7 @@ void setup() {
     P8544_splash(); 
   #endif
 
-  
+  LowWrite(); //Keep output LOW while no file is playing.
   
   pinMode(chipSelect, OUTPUT);      //Setup SD card chipselect pin
   while (!sd.begin(chipSelect,SPI_SPEED)) {  
@@ -246,21 +247,63 @@ void loop(void) {
   
   if(start)
   {
-    //TZXLoop only runs if a file is playing, and keeps the buffer full.
-    TZXLoop();
+    play_loop();
   } else {
-    digitalWrite(outputPin, LOW);    //Keep output LOW while no file is playing.
+    //LowPower.powerDown(SLEEP_15MS, ADC_OFF, BOD_OFF); //delay(5); // sleep a little if just waiting for user input, to reduce power usage
+    unsigned long ms = Watchdog.sleep(8);
+    // Try to reattach USB connection on "native USB" boards (connection is
+    // lost on sleep). Host will also need to reattach to the Serial monitor.
+    #if defined(USBCON) && !defined(USE_TINYUSB)
+    USBDevice.attach();
+    #endif
+    idle_loop(ms);
   }
+}
+
+inline void play_loop(void) {
+  //TZXLoop only runs if a file is playing, and keeps the buffer full.
+  TZXLoop();
+  if(button_play()) {
+    //If a file is playing, pause or unpause the file                  
+    pauseOn = !pauseOn;
+    if (pauseOn) {
+      printtextF(PSTR("Paused "),0);
+      Counter1();             
+      #ifdef P8544 
+        lcd.gotoRc(3,38);
+        lcd.bitmap(Paused, 1, 6);
+      #endif
+    } else {
+     printtextF(PSTR("Playing"),0);
+     Counter1();
+     
+      #ifdef P8544
+        lcd.gotoRc(3,38);
+        lcd.bitmap(Play, 1, 6);               
+      #endif
+    }
+    button_wait(button_play);
+  }
+  if(button_stop()) {
+    stopFile();
+    button_wait(button_stop);
+  }
+}
+
+
+inline void idle_loop(unsigned long millis_slept) {
+  unsigned long m = millis();
+  scrollTime -= millis_slept;
   
-  if((millis()>=scrollTime) && !start && (strlen(fileName)>15)) {
+  if((m>=scrollTime) && (strlen(fileName)>15)) {
     //Filename scrolling only runs if no file is playing to prevent I2C writes 
     //conflicting with the playback Interrupt
-    scrollTime = millis()+scrollSpeed;
+    scrollTime = m+scrollSpeed;
     scrollText(fileName);
     scrollPos +=1;
     if(scrollPos>strlen(fileName)) {
       scrollPos=0;
-      scrollTime=millis()+scrollWait;
+      scrollTime=m+scrollWait;
       scrollText(fileName);
     }
   }
@@ -268,40 +311,25 @@ void loop(void) {
   #ifdef HAVE_MOTOR
   motorState = button_motor();
   #endif
+  unsigned long next_check = 50;
+  if (millis_slept <= 50) {
+    next_check -= millis_slept;
+  }
+  else
+  {
+    next_check = 0;
+  }
   
-  if (millis() - timeDiff > 50) {   // check switch every 50ms 
-     timeDiff = millis();           // get current millisecond count
+  if (m - timeDiff > next_check) {   // check switch every 50ms  (less whatever amount of time we spent in low power sleep)
+     timeDiff = m;           // get current millisecond count
       
-      if(button_play()) {
-        //Handle Play/Pause button
-        if(!start) {
-          //If no file is play, start playback
-          playFile();
-          delay(200);
-        } else {
-          //If a file is playing, pause or unpause the file                  
-          pauseOn = !pauseOn;
-          if (pauseOn) {
-            printtextF(PSTR("Paused "),0);
-            Counter1();             
-            #ifdef P8544 
-              lcd.gotoRc(3,38);
-              lcd.bitmap(Paused, 1, 6);
-            #endif
-          } else {
-           printtextF(PSTR("Playing"),0);
-           Counter1();
-           
-            #ifdef P8544
-              lcd.gotoRc(3,38);
-              lcd.bitmap(Play, 1, 6);               
-            #endif
-          }
-       }
+     if(button_play()) {
+       //Handle Play/Pause button
+       //If no file is play, start playback
+       playFile();
        button_wait(button_play);
      }
-
-     if(button_root() && !start){
+     if(button_root()){
       
        menuMode();
        printtextF(PSTR(VERSION),0);
@@ -312,13 +340,7 @@ void loop(void) {
        
        button_wait(button_root);
      }
-
-     if(button_stop() && start) {
-       stopFile();
-       button_wait(button_stop);
-     }
-
-     if(button_stop() && !start && subdir >0) {  
+     if(button_stop() && subdir >0) {  
        subdir--;
        uint16_t this_directory=prevSubDirIndex[subdir];
     
@@ -337,73 +359,69 @@ void loop(void) {
        seekFile();
        button_wait(button_stop);
      }     
-
-     if (!start)
+     
+     if(button_down()) 
      {
-        if(button_down()) 
-        {
-          //Move down a file in the directory
-          scrollTime=millis()+scrollWait;
-          scrollPos=0;
-          downFile();
-          if (button_wait_timeout(button_down, browseDelay)) {
-            reduceBrowseDelay();
-          }
-          else
-          {
-            resetBrowseDelay();    
-          }
-        }
-
-       else if(button_up()) 
-       {
-         //Move up a file in the directory
-         scrollTime=millis()+scrollWait;
-         scrollPos=0;
-         upFile();       
-         if (button_wait_timeout(button_up, browseDelay)) {
-           reduceBrowseDelay();
-         }
-         else
-         {
-           resetBrowseDelay();    
-         }
+       //Move down a file in the directory
+       scrollTime=m+scrollWait;
+       scrollPos=0;
+       downFile();
+       if (button_wait_timeout(button_down, browseDelay)) {
+         reduceBrowseDelay();
        }
        else
        {
-        resetBrowseDelay();
+         resetBrowseDelay();    
        }
      }
+     else if(button_up()) 
+     {
+       //Move up a file in the directory
+       scrollTime=m+scrollWait;
+       scrollPos=0;
+       upFile();       
+       if (button_wait_timeout(button_up, browseDelay)) {
+         reduceBrowseDelay();
+       }
+       else
+       {
+         resetBrowseDelay();    
+       }
+     }
+     else
+     {
+      resetBrowseDelay();
+     }
+   }
 
-     #ifdef HAVE_MOTOR
-     if(start && (oldMotorState!=motorState)) {  
-       //if file is playing and motor control is on then handle current motor state
-       //Motor control works by pulling the btnMotor pin to ground to play, and NC to stop
-       if(motorState && !pauseOn) {
-        printtextF(PSTR("Paused "),0);
-        Counter1();
-        
-            #ifdef P8544 
-              lcd.gotoRc(3,38);
-              lcd.bitmap(Paused, 1, 6);
-            #endif
-         pauseOn = true;
-       } 
-       if(!motorState && pauseOn) {
-         printtextF(PSTR("Playing"),0);
-         Counter1();
-         
-            #ifdef P8544
-              lcd.gotoRc(3,38);
-              lcd.bitmap(Play, 1, 6);              
-            #endif
-            
-         pauseOn = false;
-       }
-       oldMotorState=motorState;
+   #ifdef HAVE_MOTOR
+   if(oldMotorState!=motorState) {  
+     //if file is playing and motor control is on then handle current motor state
+     //Motor control works by pulling the btnMotor pin to ground to play, and NC to stop
+     if(motorState && !pauseOn) {
+      printtextF(PSTR("Paused "),0);
+      Counter1();
+      
+          #ifdef P8544 
+            lcd.gotoRc(3,38);
+            lcd.bitmap(Paused, 1, 6);
+          #endif
+       pauseOn = true;
+     } 
+     if(!motorState && pauseOn) {
+       printtextF(PSTR("Playing"),0);
+       Counter1();
+       
+          #ifdef P8544
+            lcd.gotoRc(3,38);
+            lcd.bitmap(Play, 1, 6);              
+          #endif
+          
+       pauseOn = false;
      }
-     #endif
-  }
+     oldMotorState=motorState;
+   }
+   #endif
 }
 
 void reduceBrowseDelay() {
@@ -503,6 +521,7 @@ void stopFile() {
       lcd.bitmap(Stop, 1, 6);
     #endif
     start=false;
+    LowWrite(); //Keep output LOW while no file is playing.
   }
 }
 

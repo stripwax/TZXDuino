@@ -112,22 +112,29 @@ void button_wait(button_fn f) {
   // returns when the button has been released
   while(f()) {
     //prevent button repeats by waiting until the button is released.
-    delay(BUTTON_WAIT_DELAY);
+    Watchdog.sleep(BUTTON_WAIT_DELAY);
   }
 }
 
-bool button_wait_timeout(button_fn f, int timeout) {
+bool button_wait_timeout(button_fn f, unsigned int timeout) {
   // returns when the button has been released OR timeout reached
   // returns true if the button was still pressed (i.e. when timeout reached)
   while(f() && timeout > 0) {
     //prevent button repeats by waiting until the button is released.
     if (timeout >= BUTTON_WAIT_DELAY) {
-      delay(BUTTON_WAIT_DELAY);
-      timeout -= BUTTON_WAIT_DELAY;
+      unsigned long m = Watchdog.sleep(BUTTON_WAIT_DELAY);
+      if (m <= timeout)
+      {
+        timeout -= m;
+      }
+      else
+      {
+        timeout = 0;
+      }
     }
     else
     {
-      delay(timeout);
+      Watchdog.sleep(timeout);
       timeout = 0;
     }
   }
